@@ -9,6 +9,7 @@ python-dotenv
 # OCR y generación de documentos
 pytesseract
 pillow
+numpy
 
 # Dialogflow (voz y texto desde el bot)
 google-cloud-dialogflow
