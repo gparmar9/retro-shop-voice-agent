@@ -1,0 +1,18 @@
+# Webhook
+fastapi
+uvicorn[standard]
+
+# Modelo de lenguaje
+google-genai
+python-dotenv
+
+# OCR y generación de documentos
+pytesseract
+pillow
+
+# Dialogflow (voz y texto desde el bot)
+google-cloud-dialogflow
+
+# Bot de Telegram y voz de ElevenLabs
+python-telegram-bot
+requests
