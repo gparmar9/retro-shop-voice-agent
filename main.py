@@ -10,10 +10,20 @@ Acordaos de activar "Enable webhook call for this intent" EN CADA INTENCION
 que tenga que pasar por aqui.
 """
 
-import random
+import asyncio
+import html
+import json
+import os
 import re
+import time
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
+from google import genai
+from google.genai import types
+
+load_dotenv()  # carga GOOGLE_API_KEY desde el .env
 
 app = FastAPI()
 
@@ -160,13 +170,92 @@ def gestionar_pedido(parametros: dict) -> dict:
     )
 
 
-# Consultas sobre la tienda (OCR + LLM): se construye en la Fase 4
+# Consultas sobre la tienda: respuesta documental (OCR + LLM)
+#
+# Los documentos se leyeron UNA VEZ con ocr.py y estan en datos/documentos.json.
+# Aqui solo se leen del disco al arrancar: nunca hay OCR dentro de la peticion,
+# porque Dialogflow corta a los 5 segundos. Son pocos y cortos, asi que se
+# meten enteros en el prompt (sin base vectorial).
 
-def gestionar_consulta(pregunta: str) -> dict:
-    return responder(
-        "Déjame mirar mis papeles... esto lo tengo todavía a medio cartucho, "
-        "vuelve a preguntármelo en un rato."
+RUTA_DOCUMENTOS = Path(__file__).parent / "datos" / "documentos.json"
+MODELO = "gemini-3.5-flash-lite"   # ~1 s; el 3.8 Flash esta saturado (503)
+
+
+def cargar_documentos() -> str:
+    if not RUTA_DOCUMENTOS.exists():
+        print("AVISO: no existe datos/documentos.json. Ejecuta antes: python ocr.py")
+        return ""
+    datos = json.loads(RUTA_DOCUMENTOS.read_text(encoding="utf-8"))
+    separador = "\n\n---\n\n"
+    return separador.join(
+        f"DOCUMENTO: {nombre}\n{d['texto']}" for nombre, d in datos.items()
     )
+
+
+CONTEXTO = cargar_documentos()
+print(f"Documentos cargados: {len(CONTEXTO)} caracteres\n")
+
+cliente = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
+
+# Dialogflow corta a los 5 s. La API de Gemini no admite timeouts de cliente
+# menores de 10 s, asi que el limite lo ponemos nosotros con asyncio.wait_for.
+LIMITE_LLM = 3.5
+
+INSTRUCCIONES = """Eres Paco "Cartucho", dependiente de Game Non Stop, una tienda de videojuegos retro.
+Hablas en español de España, cercano y con el humor de un friki de los 90, pero breve:
+como máximo dos frases, porque tu respuesta se convierte en voz.
+No uses asteriscos, listas ni formato. Di las cifras tal y como aparecen en los documentos."""
+
+PLANTILLA = """Responde a la pregunta del cliente usando ÚNICAMENTE la información de los
+DOCUMENTOS que vienen a continuación. Si la respuesta no está en los documentos,
+responde exactamente con la palabra NO_LO_SE y nada más. No supongas ni completes
+con conocimiento propio.
+
+DOCUMENTOS:
+{contexto}
+
+PREGUNTA: {pregunta}"""
+
+# Lo que dice Paco cuando el dato no esta en los documentos (control de alucinaciones)
+SIN_RESPUESTA = (
+    "Uy, eso no lo tengo apuntado en mis papeles, y yo no me invento nada. "
+    "Pregúntame por devoluciones, garantía, tasación, el club o las consolas."
+)
+
+
+async def gestionar_consulta(pregunta: str) -> dict:
+    if not CONTEXTO:
+        return responder(SIN_RESPUESTA)
+
+    inicio = time.time()
+    # El try/except no es decorativo: si el modelo falla o tarda, hay que devolver
+    # algo igualmente. Un webhook que lanza una excepcion deja al usuario en silencio.
+    try:
+        respuesta = await asyncio.wait_for(
+            cliente.aio.models.generate_content(
+                model=MODELO,
+                contents=PLANTILLA.format(contexto=CONTEXTO, pregunta=pregunta),
+                config=types.GenerateContentConfig(
+                    system_instruction=INSTRUCCIONES,
+                    temperature=0.1,
+                    max_output_tokens=200,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                ),
+            ),
+            timeout=LIMITE_LLM,
+        )
+        texto = (respuesta.text or "").strip()
+    except Exception as e:
+        print("ERROR LLM:", type(e).__name__, e)
+        return responder("Se me ha colgado el cartucho un momento. ¿Me lo repites?")
+
+    print(f"LLM ({time.time() - inicio:.1f}s): {texto!r}")
+
+    if not texto or "NO_LO_SE" in texto:
+        return responder(SIN_RESPUESTA)
+
+    # Quitamos formato y escapamos &, < y >, que romperian el SSML
+    return responder(html.escape(texto.replace("*", ""), quote=False))
 
 
 # Endpoint
@@ -198,7 +287,7 @@ async def webhook(request: Request):
         return gestionar_pedido(parametros)
 
     if intencion in ("consulta_tienda", "Default Fallback Intent"):
-        return gestionar_consulta(pregunta)
+        return await gestionar_consulta(pregunta)
 
     # Nunca dejar al agente sin respuesta
     return responder("Eso todavía no sé gestionarlo, pero Paco aprende rápido.")
