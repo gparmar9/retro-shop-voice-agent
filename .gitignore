@@ -1,0 +1,27 @@
+# Entorno virtual
+venv/
+.venv/
+
+# Secretos: nunca se suben
+.env
+clave*.json
+*credentials*.json
+*service-account*.json
+*-key.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Audio generado en las pruebas
+*.mp3
+*.ogg
+*.wav
+
+# Ficheros de trabajo con Claude (no forman parte de la entrega)
+PLAN.md
+CLAUDE.md
+.claude/
+
+# Enunciado de la tarea
+1-Enunciado_Evaluacion_Final.pdf
